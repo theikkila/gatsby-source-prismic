@@ -39,14 +39,74 @@ const isSliceField = (key, value) =>
 const isGroupField = value =>
   Array.isArray(value) && typeof value[0] === 'object'
 
+const loadFile = async (createNode, createNodeId, store, cache, touchNode, url) => {
+  let fileNodeID
+  const mediaDataCacheKey = `prismic-media-${url}`
+  const cacheMediaData = await cache.get(mediaDataCacheKey)
+  // If we have cached media data and it wasn't modified, reuse previously
+  // created file node to not try to redownload.
+  if (cacheMediaData) {
+    fileNodeID = cacheMediaData.fileNodeID
+    touchNode({ nodeId: cacheMediaData.fileNodeID })
+  }
+  // If we don't have cached data, download the file.
+  if (!fileNodeID) {
+    try {
+      const fileNode = await createRemoteFileNode({
+        url,
+        store,
+        cache,
+        createNode,
+        createNodeId,
+      })
+      if (fileNode) {
+        fileNodeID = fileNode.id
+        await cache.set(mediaDataCacheKey, { fileNodeID })
+      }
+    } catch (error) {
+      console.log(error)
+    }
+  }
+  return fileNodeID
+}
+
 // Normalizes a rich text field by providing HTML and text versions of the
 // value using `prismic-dom` on the `html` and `text` keys, respectively. The
 // raw value is provided on the `raw` key.
-const normalizeRichTextField = (value, linkResolver, htmlSerializer) => ({
-  html: PrismicDOM.RichText.asHtml(value, linkResolver, htmlSerializer),
-  text: PrismicDOM.RichText.asText(value),
-  raw: value,
-})
+const normalizeRichTextField = async (value, linkResolver, htmlSerializer, args) => {
+  const { createNode, createNodeId, store, cache, touchNode } = args
+
+  const v = await Promise.all(value.map(async el => {
+
+    switch (el.type) {
+      case "image":
+        const fileNodeID = await loadFile(createNode, createNodeId, store, cache, touchNode, el.url)
+        return {
+          ...el,
+          localFile___NODE: fileNodeID,
+        }
+      case "paragraph":
+        el.spans = el.spans.map(span => {
+          if (span.type == "hyperlink") {
+            span.data.url = span.data.url || "";
+            span.data.uid = span.data.uid || "";
+            span.data.type = span.data.type || "";
+            span.data.target = span.data.target || "";
+            span.data.tags = span.data.tags || [];
+          }
+          console.log(span.data)
+          return span
+        })
+      default:
+        return el;
+    }
+  }))
+  return {
+    html: PrismicDOM.RichText.asHtml(v, linkResolver, htmlSerializer),
+    text: PrismicDOM.RichText.asText(v),
+    raw: v,
+  }
+}
 
 // Normalizes a link field by providing a resolved URL using `prismic-dom` on
 // the `url` field. If the value is an external link, the value is provided
@@ -78,39 +138,12 @@ const normalizeLinkField = (value, linkResolver, generateNodeId) => {
 // File node using `gatsby-source-filesystem`. This allows for
 // `gatsby-transformer-sharp` and `gatsby-image` integration. The linked node
 // data is provided on the `localFile` key.
+
+
 const normalizeImageField = async args => {
   const { value, createNode, createNodeId, store, cache, touchNode } = args
 
-  let fileNodeID
-  const mediaDataCacheKey = `prismic-media-${value.url}`
-  const cacheMediaData = await cache.get(mediaDataCacheKey)
-
-  // If we have cached media data and it wasn't modified, reuse previously
-  // created file node to not try to redownload.
-  if (cacheMediaData) {
-    fileNodeID = cacheMediaData.fileNodeID
-    touchNode({ nodeId: cacheMediaData.fileNodeID })
-  }
-
-  // If we don't have cached data, download the file.
-  if (!fileNodeID) {
-    try {
-      const fileNode = await createRemoteFileNode({
-        url: value.url,
-        store,
-        cache,
-        createNode,
-        createNodeId,
-      })
-
-      if (fileNode) {
-        fileNodeID = fileNode.id
-        await cache.set(mediaDataCacheKey, { fileNodeID })
-      }
-    } catch (error) {
-      console.log(error)
-    }
-  }
+  const fileNodeID = await loadFile(createNode, createNodeId, store, cache, touchNode, value.url)
 
   if (fileNodeID) {
     return {
@@ -182,7 +215,7 @@ export const normalizeField = async args => {
   htmlSerializer = htmlSerializer({ node, key, value })
 
   if (isRichTextField(value))
-    return normalizeRichTextField(value, linkResolver, htmlSerializer)
+    return await normalizeRichTextField(value, linkResolver, htmlSerializer, args)
 
   if (isLinkField(value))
     return normalizeLinkField(value, linkResolver, generateNodeId)
